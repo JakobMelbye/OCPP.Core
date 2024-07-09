@@ -17,25 +17,13 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.IO;
-using System.Net.WebSockets;
-using System.Text;
-using System.Text.RegularExpressions;
-using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
-using Newtonsoft.Json;
 using OCPP.Core.Database;
 
 namespace OCPP.Core.Server
@@ -46,6 +34,7 @@ namespace OCPP.Core.Server
         /// ILogger object
         /// </summary>
         private ILoggerFactory LoggerFactory { get; set; }
+        public static string MessageDumpDirectoryPath = string.Empty;
 
         public Startup(IConfiguration configuration)
         {
@@ -88,7 +77,7 @@ namespace OCPP.Core.Server
             }
 
             // Set WebSocketsOptions
-            var webSocketOptions = new WebSocketOptions() 
+            var webSocketOptions = new WebSocketOptions()
             {
             };
 

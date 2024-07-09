@@ -1,13 +1,10 @@
 ﻿using Microsoft.AspNetCore.Http;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using OCPP.Core.Database;
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -65,17 +62,21 @@ namespace OCPP.Core.Server
                             }
 
                             string ocppMessage = UTF8Encoding.UTF8.GetString(bMessage);
+                            OCPPMessage msgIn = GetOCPP16Message(ocppMessage);
 
-                            Match match = Regex.Match(ocppMessage, MessageRegExp);
-                            if (match != null && match.Groups != null && match.Groups.Count >= 3)
+                            //Match match = Regex.Match(ocppMessage, MessageRegExp);
+                            //if (match != null && match.Groups != null && match.Groups.Count >= 3)
+                            if (!string.IsNullOrEmpty(msgIn.MessageType)
+                                || !string.IsNullOrEmpty(msgIn.UniqueId)
+                                || !string.IsNullOrEmpty(msgIn.Action)
+                                || !string.IsNullOrEmpty(msgIn.JsonPayload))
                             {
-                                string messageTypeId = match.Groups[1].Value;
-                                string uniqueId = match.Groups[2].Value;
-                                string action = match.Groups[3].Value;
-                                string jsonPaylod = match.Groups[4].Value;
-                                logger.LogInformation("OCPPMiddleware.Receive16 => OCPP-Message: Type={0} / ID={1} / Action={2})", messageTypeId, uniqueId, action);
+                                //string messageTypeId = match.Groups[1].Value;
+                                //string uniqueId = match.Groups[2].Value;
+                                //string action = match.Groups[3].Value;
+                                //string jsonPaylod = match.Groups[4].Value;
+                                logger.LogInformation("OCPPMiddleware.Receive16 => OCPP-Message: Type={0} / ID={1} / Action={2})", msgIn.MessageType, msgIn.UniqueId, msgIn.Action);
 
-                                OCPPMessage msgIn = new OCPPMessage(messageTypeId, uniqueId, action, jsonPaylod);
                                 if (msgIn.MessageType == "2")
                                 {
                                     // Request from chargepoint to OCPP server
@@ -105,7 +106,7 @@ namespace OCPP.Core.Server
                             }
                             else
                             {
-                                logger.LogWarning("OCPPMiddleware.Receive16 => Error in RegEx-Matching: Msg={0})", ocppMessage);
+                                logger.LogWarning("OCPPMiddleware.Receive16 => Error in deserializing OCCP Message: Msg={0})", ocppMessage);
                             }
                         }
                     }
@@ -226,7 +227,7 @@ namespace OCPP.Core.Server
             }
 
             string dumpDir = _configuration.GetValue<string>("MessageDumpDir");
-            if (!string.IsNullOrWhiteSpace(dumpDir))
+            if (string.IsNullOrWhiteSpace(dumpDir))
             {
                 // Write outgoing message into dump directory
                 string path = Path.Combine(dumpDir, string.Format("{0}_ocpp16-out.txt", DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-ffff")));
@@ -242,6 +243,33 @@ namespace OCPP.Core.Server
 
             byte[] binaryMessage = UTF8Encoding.UTF8.GetBytes(ocppTextMessage);
             await webSocket.SendAsync(new ArraySegment<byte>(binaryMessage, 0, binaryMessage.Length), WebSocketMessageType.Text, true, CancellationToken.None);
+        }
+
+        private static OCPPMessage GetOCPP16Message(string ocppMessage)
+        {
+            ocppMessage = ocppMessage.Replace("\r\n", "");
+            ocppMessage = ocppMessage.Replace("\n", "");
+            ocppMessage = ocppMessage.Replace("\t", "");
+
+            Match match = Regex.Match(ocppMessage, MessageRegExp);
+
+            if (match == null || match.Groups == null || match.Groups.Count < 3)
+            {
+                throw new FormatException($"Error in RegEx-Matching: Msg={ocppMessage}");
+            }
+
+            string messageTypeId = match.Groups[1].Value;
+            string uniqueId = match.Groups[2].Value;
+            string action = match.Groups[3].Value;
+            string jsonPayload = match.Groups[4].Value;
+
+            return new OCPPMessage
+            {
+                Action = action,
+                MessageType = messageTypeId,
+                UniqueId = uniqueId,
+                JsonPayload = jsonPayload
+            };
         }
     }
 }

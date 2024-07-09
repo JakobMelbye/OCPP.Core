@@ -42,15 +42,11 @@
  </cs:meterValuesRequest>
  */
 
-using System;
-using System.Collections.Generic;
-using System.Globalization;
-using System.Linq;
-using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
-using OCPP.Core.Database;
 using OCPP.Core.Server.Messages_OCPP16;
+using System;
+using System.Globalization;
 
 namespace OCPP.Core.Server
 {
@@ -83,8 +79,8 @@ namespace OCPP.Core.Server
                     {
                         foreach (SampledValue sampleValue in meterValue.SampledValue)
                         {
-                            Logger.LogTrace("MeterValues => Context={0} / Format={1} / Value={2} / Unit={3} / Location={4} / Measurand={5} / Phase={6}",
-                                sampleValue.Context, sampleValue.Format, sampleValue.Value, sampleValue.Unit, sampleValue.Location, sampleValue.Measurand, sampleValue.Phase);
+                            Logger.LogTrace("MeterValues => Context={0} / Format={1} / Value={2} / Unit={3} / Measurand={4} / Phase={5}",
+                                sampleValue.Context, sampleValue.Format, sampleValue.Value, sampleValue.Unit, sampleValue.Measurand, sampleValue.Phase);
 
                             if (sampleValue.Measurand == SampledValueMeasurand.Power_Active_Import)
                             {

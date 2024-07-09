@@ -5,8 +5,8 @@ using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using OCPP.Core.Database;
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.WebSockets;
@@ -43,7 +43,6 @@ namespace OCPP.Core.Server
             _next = next;
             _logFactory = logFactory;
             _configuration = configuration;
-
             _logger = logFactory.CreateLogger("OCPPMiddleware");
         }
 
@@ -51,370 +50,437 @@ namespace OCPP.Core.Server
         {
             _logger.LogTrace("OCPPMiddleware => Websocket request: Path='{0}'", context.Request.Path);
 
-            ChargePointStatus chargePointStatus = null;
-
             if (context.Request.Path.StartsWithSegments("/OCPP"))
             {
-                string chargepointIdentifier;
-                string[] parts = context.Request.Path.Value.Split('/');
-                if (string.IsNullOrWhiteSpace(parts[parts.Length - 1]))
-                {
-                    // (Last part - 1) is chargepoint identifier
-                    chargepointIdentifier = parts[parts.Length - 2];
-                }
-                else
-                {
-                    // Last part is chargepoint identifier
-                    chargepointIdentifier = parts[parts.Length - 1];
-                }
-                _logger.LogInformation("OCPPMiddleware => Connection request with chargepoint identifier = '{0}'", chargepointIdentifier);
-
-                // Known chargepoint?
-                if (!string.IsNullOrWhiteSpace(chargepointIdentifier))
-                {
-                    ChargePoint chargePoint = dbContext.Find<ChargePoint>(chargepointIdentifier);
-                    if (chargePoint != null)
-                    {
-                        _logger.LogInformation("OCPPMiddleware => SUCCESS: Found chargepoint with identifier={0}", chargePoint.ChargePointId);
-
-                        // Check optional chargepoint authentication
-                        if (!string.IsNullOrWhiteSpace(chargePoint.Username))
-                        {
-                            // Chargepoint MUST send basic authentication header
-
-                            bool basicAuthSuccess = false;
-                            string authHeader = context.Request.Headers["Authorization"];
-                            if (!string.IsNullOrEmpty(authHeader))
-                            {
-                                string[] cred = System.Text.ASCIIEncoding.ASCII.GetString(Convert.FromBase64String(authHeader.Substring(6))).Split(':');
-                                if (cred.Length == 2 && chargePoint.Username == cred[0] && chargePoint.Password == cred[1])
-                                {
-                                    // Authentication match => OK
-                                    _logger.LogInformation("OCPPMiddleware => SUCCESS: Basic authentication for chargepoint '{0}' match", chargePoint.ChargePointId);
-                                    basicAuthSuccess = true;
-                                }
-                                else
-                                {
-                                    // Authentication does NOT match => Failure
-                                    _logger.LogWarning("OCPPMiddleware => FAILURE: Basic authentication for chargepoint '{0}' does NOT match", chargePoint.ChargePointId);
-                                }
-                            }
-                            if (basicAuthSuccess == false)
-                            {
-                                context.Response.Headers.Append("WWW-Authenticate", "Basic realm=\"OCPP.Core\"");
-                                context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
-                                return;
-                            }
-
-                        }
-                        else if (!string.IsNullOrWhiteSpace(chargePoint.ClientCertThumb))
-                        {
-                            // Chargepoint MUST send basic authentication header
-
-                            bool certAuthSuccess = false;
-                            X509Certificate2 clientCert = context.Connection.ClientCertificate;
-                            if (clientCert != null)
-                            {
-                                if (clientCert.Thumbprint.Equals(chargePoint.ClientCertThumb, StringComparison.InvariantCultureIgnoreCase))
-                                {
-                                    // Authentication match => OK
-                                    _logger.LogInformation("OCPPMiddleware => SUCCESS: Certificate authentication for chargepoint '{0}' match", chargePoint.ChargePointId);
-                                    certAuthSuccess = true;
-                                }
-                                else
-                                {
-                                    // Authentication does NOT match => Failure
-                                    _logger.LogWarning("OCPPMiddleware => FAILURE: Certificate authentication for chargepoint '{0}' does NOT match", chargePoint.ChargePointId);
-                                }
-                            }
-                            if (certAuthSuccess == false)
-                            {
-                                context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
-                                return;
-                            }
-                        }
-                        else
-                        {
-                            _logger.LogInformation("OCPPMiddleware => No authentication for chargepoint '{0}' configured", chargePoint.ChargePointId);
-                        }
-
-                        // Store chargepoint data
-                        chargePointStatus = new ChargePointStatus(chargePoint);
-                    }
-                    else
-                    {
-                        _logger.LogWarning("OCPPMiddleware => FAILURE: Found no chargepoint with identifier={0}", chargepointIdentifier);
-                    }
-                }
-
-                if (chargePointStatus != null)
-                {
-                    if (context.WebSockets.IsWebSocketRequest)
-                    {
-                        // Match supported sub protocols
-                        string subProtocol = null;
-                        foreach (string supportedProtocol in SupportedProtocols)
-                        {
-                            if (context.WebSockets.WebSocketRequestedProtocols.Contains(supportedProtocol))
-                            {
-                                subProtocol = supportedProtocol;
-                                break;
-                            }
-                        }
-                        if (string.IsNullOrEmpty(subProtocol))
-                        {
-                            // Not matching protocol! => failure
-                            string protocols = string.Empty;
-                            foreach (string p in context.WebSockets.WebSocketRequestedProtocols)
-                            {
-                                if (string.IsNullOrEmpty(protocols)) protocols += ",";
-                                protocols += p;
-                            }
-                            _logger.LogWarning("OCPPMiddleware => No supported sub-protocol in '{0}' from charge station '{1}'", protocols, chargepointIdentifier);
-                            context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
-                        }
-                        else
-                        {
-                            chargePointStatus.Protocol = subProtocol;
-
-                            bool statusSuccess = false;
-                            try
-                            {
-                                _logger.LogTrace("OCPPMiddleware => Store/Update status object");
-
-                                lock (_chargePointStatusDict)
-                                {
-                                    // Check if this chargepoint already/still hat a status object
-                                    if (_chargePointStatusDict.ContainsKey(chargepointIdentifier))
-                                    {
-                                        // exists => check status
-                                        if (_chargePointStatusDict[chargepointIdentifier].WebSocket.State != WebSocketState.Open)
-                                        {
-                                            // Closed or aborted => remove
-                                            _chargePointStatusDict.Remove(chargepointIdentifier);
-                                        }
-                                    }
-
-                                    _chargePointStatusDict.Add(chargepointIdentifier, chargePointStatus);
-                                    statusSuccess = true;
-                                }
-                            }
-                            catch(Exception exp)
-                            {
-                                _logger.LogError(exp, "OCPPMiddleware => Error storing status object in dictionary => refuse connection");
-                                context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
-                            }
-
-                            if (statusSuccess)
-                            {
-                                // Handle socket communication
-                                _logger.LogTrace("OCPPMiddleware => Waiting for message...");
-
-                                using (WebSocket webSocket = await context.WebSockets.AcceptWebSocketAsync(subProtocol))
-                                {
-                                    _logger.LogTrace("OCPPMiddleware => WebSocket connection with charge point '{0}'", chargepointIdentifier);
-                                    chargePointStatus.WebSocket = webSocket;
-
-                                    if (subProtocol == Protocol_OCPP20)
-                                    {
-                                        // OCPP V2.0
-                                        await Receive20(chargePointStatus, context, dbContext);
-                                    }
-                                    else
-                                    {
-                                        // OCPP V1.6
-                                        await Receive16(chargePointStatus, context, dbContext);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    else
-                    {
-                        // no websocket request => failure
-                        _logger.LogWarning("OCPPMiddleware => Non-Websocket request");
-                        context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
-                    }
-                }
-                else
-                {
-                    // unknown chargepoint
-                    _logger.LogTrace("OCPPMiddleware => no chargepoint: http 412");
-                    context.Response.StatusCode = (int)HttpStatusCode.PreconditionFailed;
-                }
+                await ProcessOcppRequest(context, dbContext);
             }
             else if (context.Request.Path.StartsWithSegments("/API"))
             {
-                // Check authentication (X-API-Key)
-                string apiKeyConfig = _configuration.GetValue<string>("ApiKey");
-                if (!string.IsNullOrWhiteSpace(apiKeyConfig))
-                {
-                    // ApiKey specified => check request
-                    string apiKeyCaller = context.Request.Headers["X-API-Key"].FirstOrDefault();
-                    if (apiKeyConfig == apiKeyCaller)
-                    {
-                        // API-Key matches
-                        _logger.LogInformation("OCPPMiddleware => Success: X-API-Key matches");
-                    }
-                    else
-                    {
-                        // API-Key does NOT matches => authentication failure!!!
-                        _logger.LogWarning("OCPPMiddleware => Failure: Wrong X-API-Key! Caller='{0}'", apiKeyCaller);
-                        context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
-                        return;
-                    }
-                }
-                else
-                {
-                    // No API-Key configured => no authenticatiuon
-                    _logger.LogWarning("OCPPMiddleware => No X-API-Key configured!");
-                }
-
-                // format: /API/<command>[/chargepointId]
-                string[] urlParts = context.Request.Path.Value.Split('/');
-
-                if (urlParts.Length >= 3)
-                {
-                    string cmd = urlParts[2];
-                    string urlChargePointId = (urlParts.Length >= 4) ? urlParts[3] : null;
-                    _logger.LogTrace("OCPPMiddleware => cmd='{0}' / id='{1}' / FullPath='{2}')", cmd, urlChargePointId, context.Request.Path.Value);
-
-                    if (cmd == "Status")
-                    {
-                        try
-                        {
-                            List<ChargePointStatus> statusList = new List<ChargePointStatus>();
-                            foreach (ChargePointStatus status in _chargePointStatusDict.Values)
-                            {
-                                statusList.Add(status);
-                            }
-                            string jsonStatus = JsonConvert.SerializeObject(statusList);
-                            context.Response.ContentType = "application/json";
-                            await context.Response.WriteAsync(jsonStatus);
-                        }
-                        catch (Exception exp)
-                        {
-                            _logger.LogError(exp, "OCPPMiddleware => Error: {0}", exp.Message);
-                            context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
-                        }
-                    }
-                    else if (cmd == "Reset")
-                    {
-                        if (!string.IsNullOrEmpty(urlChargePointId))
-                        {
-                            try
-                            {
-                                ChargePointStatus status = null;
-                                if (_chargePointStatusDict.TryGetValue(urlChargePointId, out status))
-                                {
-                                    // Send message to chargepoint
-                                    if (status.Protocol == Protocol_OCPP20)
-                                    {
-                                        // OCPP V2.0
-                                        await Reset20(status, context, dbContext);
-                                    }
-                                    else
-                                    {
-                                        // OCPP V1.6
-                                        await Reset16(status, context, dbContext);
-                                    }
-                                }
-                                else
-                                {
-                                    // Chargepoint offline
-                                    _logger.LogError("OCPPMiddleware SoftReset => Chargepoint offline: {0}", urlChargePointId);
-                                    context.Response.StatusCode = (int)HttpStatusCode.NotFound;
-                                }
-                            }
-                            catch (Exception exp)
-                            {
-                                _logger.LogError(exp, "OCPPMiddleware SoftReset => Error: {0}", exp.Message);
-                                context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
-                            }
-                        }
-                        else
-                        {
-                            _logger.LogError("OCPPMiddleware SoftReset => Missing chargepoint ID");
-                            context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
-                        }
-                    }
-                    else if (cmd == "UnlockConnector")
-                    {
-                        if (!string.IsNullOrEmpty(urlChargePointId))
-                        {
-                            try
-                            {
-                                ChargePointStatus status = null;
-                                if (_chargePointStatusDict.TryGetValue(urlChargePointId, out status))
-                                {
-                                    // Send message to chargepoint
-                                    if (status.Protocol == Protocol_OCPP20)
-                                    {
-                                        // OCPP V2.0
-                                        await UnlockConnector20(status, context, dbContext);
-                                    }
-                                    else
-                                    {
-                                        // OCPP V1.6
-                                        await UnlockConnector16(status, context, dbContext);
-                                    }
-                                }
-                                else
-                                {
-                                    // Chargepoint offline
-                                    _logger.LogError("OCPPMiddleware UnlockConnector => Chargepoint offline: {0}", urlChargePointId);
-                                    context.Response.StatusCode = (int)HttpStatusCode.NotFound;
-                                }
-                            }
-                            catch (Exception exp)
-                            {
-                                _logger.LogError(exp, "OCPPMiddleware UnlockConnector => Error: {0}", exp.Message);
-                                context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
-                            }
-                        }
-                        else
-                        {
-                            _logger.LogError("OCPPMiddleware UnlockConnector => Missing chargepoint ID");
-                            context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
-                        }
-                    }
-                    else
-                    {
-                        // Unknown action/function
-                        _logger.LogWarning("OCPPMiddleware => action/function: {0}", cmd);
-                        context.Response.StatusCode = (int)HttpStatusCode.NotFound;
-                    }
-                }
+                await ProcessApiRequest(context, dbContext);
             }
             else if (context.Request.Path.StartsWithSegments("/"))
             {
-                try
-                {
-                    bool showIndexInfo = _configuration.GetValue<bool>("ShowIndexInfo");
-                    if (showIndexInfo)
-                    {
-                        _logger.LogTrace("OCPPMiddleware => Index status page");
+                await ProcessIndexRequest(context);
+            }
+            else
+            {
+                ProcessInvalidRequest(context);
+            }
+        }
 
-                        context.Response.ContentType = "text/plain";
-                        await context.Response.WriteAsync(string.Format("Running...\r\n\r\n{0} chargepoints connected", _chargePointStatusDict.Values.Count));
+        private async Task ProcessOcppRequest(HttpContext context, OCPPCoreContext dbContext)
+        {
+            string chargepointIdentifier = GetChargePointIdentifierFromRequest(context);
+            _logger.LogInformation("OCPPMiddleware => Connection request with chargepoint identifier = '{0}'", chargepointIdentifier);
+
+            // Known chargepoint?
+            if (string.IsNullOrWhiteSpace(chargepointIdentifier))
+            {
+                // no websocket request => failure
+                _logger.LogWarning("OCPPMiddleware => FAILURE: Found no chargepoint identifier");
+                context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+                return;
+            }
+
+            ChargePoint chargePoint = dbContext.Find<ChargePoint>(chargepointIdentifier);
+
+            if (chargePoint == null)
+            {
+                _logger.LogWarning("OCPPMiddleware => FAILURE: Found no chargepoint with identifier={0}", chargepointIdentifier);
+                context.Response.StatusCode = (int)HttpStatusCode.PreconditionFailed;
+                return;
+            }
+
+            _logger.LogInformation("OCPPMiddleware => SUCCESS: Found chargepoint with identifier={0}", chargePoint.ChargePointId);
+
+            bool useBasicAuthorization = _configuration.GetValue<bool>("UseBasicAuthorization");
+
+            if (useBasicAuthorization && !string.IsNullOrWhiteSpace(chargePoint.Username))
+            {
+                var isUserAuthorized = IsUserAuthorized(context, chargePoint);
+
+                if (!isUserAuthorized)
+                {
+                    context.Response.Headers.Append("WWW-Authenticate", "Basic realm=\"OCPP.Core\"");
+                    context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+                    return;
+                }
+            }
+
+            bool useClientCertAuthorization = _configuration.GetValue<bool>("UseClientCertAuthorization");
+
+            if (useClientCertAuthorization && !string.IsNullOrWhiteSpace(chargePoint.ClientCertThumb))
+            {
+                bool isClientCertAuthorized = IsClientCertAuthorized(context, chargePoint);
+
+                if (!isClientCertAuthorized)
+                {
+                    context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+                    return;
+                }
+            }
+
+            // Store chargepoint data
+            ChargePointStatus chargePointStatus = new(chargePoint);
+
+            if (!context.WebSockets.IsWebSocketRequest)
+            {
+                // no websocket request => failure
+                _logger.LogWarning("OCPPMiddleware => Non-Websocket request");
+                context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+                return;
+            }
+
+            // Match supported sub protocols
+            string subProtocol = GetProtocol(context, chargepointIdentifier);
+
+            if (string.IsNullOrEmpty(subProtocol))
+            {
+                return;
+            }
+
+            chargePointStatus.Protocol = subProtocol;
+
+            bool statusSuccess = false;
+            try
+            {
+                _logger.LogTrace("OCPPMiddleware => Store/Update status object");
+                statusSuccess = AddChargePointStatus(chargepointIdentifier, chargePointStatus);
+            }
+            catch (Exception exp)
+            {
+                _logger.LogError(exp, "OCPPMiddleware => Error storing status object in dictionary => refuse connection");
+                context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
+            }
+
+            if (statusSuccess)
+            {
+                // Handle socket communication
+                _logger.LogTrace("OCPPMiddleware => Waiting for message...");
+
+                using (WebSocket webSocket = await context.WebSockets.AcceptWebSocketAsync(subProtocol))
+                {
+                    _logger.LogTrace("OCPPMiddleware => WebSocket connection with charge point '{0}'", chargepointIdentifier);
+                    chargePointStatus.WebSocket = webSocket;
+
+                    if (subProtocol == Protocol_OCPP20)
+                    {
+                        // OCPP V2.0
+                        await Receive20(chargePointStatus, context, dbContext);
                     }
                     else
                     {
-                        _logger.LogInformation("OCPPMiddleware => Root path with deactivated index page");
-                        context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+                        // OCPP V1.6
+                        await Receive16(chargePointStatus, context, dbContext);
                     }
                 }
-                catch (Exception exp)
+            }
+        }
+
+        private static bool AddChargePointStatus(string chargepointIdentifier, ChargePointStatus chargePointStatus)
+        {
+            bool statusSuccess;
+            lock (_chargePointStatusDict)
+            {
+                // Check if this chargepoint already/still hat a status object
+                if (_chargePointStatusDict.ContainsKey(chargepointIdentifier))
                 {
-                    _logger.LogError(exp, "OCPPMiddleware => Error: {0}", exp.Message);
-                    context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
+                    // exists => check status
+                    if (_chargePointStatusDict[chargepointIdentifier].WebSocket.State != WebSocketState.Open)
+                    {
+                        // Closed or aborted => remove
+                        _chargePointStatusDict.Remove(chargepointIdentifier);
+                    }
+                }
+
+                _chargePointStatusDict.Add(chargepointIdentifier, chargePointStatus);
+                statusSuccess = true;
+            }
+
+            return statusSuccess;
+        }
+
+        private void ProcessInvalidRequest(HttpContext context)
+        {
+            _logger.LogWarning("OCPPMiddleware => Bad path request");
+            context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+        }
+
+        private async Task ProcessIndexRequest(HttpContext context)
+        {
+            try
+            {
+                bool showIndexInfo = _configuration.GetValue<bool>("ShowIndexInfo");
+                if (showIndexInfo)
+                {
+                    _logger.LogTrace("OCPPMiddleware => Index status page");
+
+                    context.Response.ContentType = "text/plain";
+                    await context.Response.WriteAsync(string.Format("Running...\r\n\r\n{0} chargepoints connected", _chargePointStatusDict.Values.Count));
+                }
+                else
+                {
+                    _logger.LogInformation("OCPPMiddleware => Root path with deactivated index page");
+                    context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+                }
+            }
+            catch (Exception exp)
+            {
+                _logger.LogError(exp, "OCPPMiddleware => Error: {0}", exp.Message);
+                context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
+            }
+        }
+
+        private string GetProtocol(HttpContext context, string chargepointIdentifier)
+        {
+            string subProtocol = null;
+
+            foreach (string supportedProtocol in SupportedProtocols)
+            {
+                if (context.WebSockets.WebSocketRequestedProtocols.Contains(supportedProtocol))
+                {
+                    subProtocol = supportedProtocol;
+                    break;
+                }
+            }
+            if (string.IsNullOrEmpty(subProtocol))
+            {
+                // Not matching protocol! => failure
+                string protocols = string.Empty;
+                foreach (string p in context.WebSockets.WebSocketRequestedProtocols)
+                {
+                    if (string.IsNullOrEmpty(protocols)) protocols += ",";
+                    protocols += p;
+                }
+                _logger.LogWarning("OCPPMiddleware => No supported sub-protocol in '{0}' from charge station '{1}'", protocols, chargepointIdentifier);
+                context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+            }
+
+            return subProtocol;
+        }
+
+        private async Task ProcessApiRequest(HttpContext context, OCPPCoreContext dbContext)
+        {
+            // Check authentication (X-API-Key)
+            string apiKeyConfig = _configuration.GetValue<string>("ApiKey");
+            if (!string.IsNullOrWhiteSpace(apiKeyConfig))
+            {
+                // ApiKey specified => check request
+                string apiKeyCaller = context.Request.Headers["X-API-Key"].FirstOrDefault();
+                if (apiKeyConfig == apiKeyCaller)
+                {
+                    // API-Key matches
+                    _logger.LogInformation("OCPPMiddleware => Success: X-API-Key matches");
+                }
+                else
+                {
+                    // API-Key does NOT matches => authentication failure!!!
+                    _logger.LogWarning("OCPPMiddleware => Failure: Wrong X-API-Key! Caller='{0}'", apiKeyCaller);
+                    context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+                    return;
                 }
             }
             else
             {
-                _logger.LogWarning("OCPPMiddleware => Bad path request");
-                context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+                // No API-Key configured => no authenticatiuon
+                _logger.LogWarning("OCPPMiddleware => No X-API-Key configured!");
             }
+
+            // format: /API/<command>[/chargepointId]
+            string[] urlParts = context.Request.Path.Value.Split('/');
+
+            if (urlParts.Length >= 3)
+            {
+                string cmd = urlParts[2];
+                string urlChargePointId = (urlParts.Length >= 4) ? urlParts[3] : null;
+                _logger.LogTrace("OCPPMiddleware => cmd='{0}' / id='{1}' / FullPath='{2}')", cmd, urlChargePointId, context.Request.Path.Value);
+
+                if (cmd == "Status")
+                {
+                    try
+                    {
+                        List<ChargePointStatus> statusList = new List<ChargePointStatus>();
+                        foreach (ChargePointStatus status in _chargePointStatusDict.Values)
+                        {
+                            statusList.Add(status);
+                        }
+                        string jsonStatus = JsonConvert.SerializeObject(statusList);
+                        context.Response.ContentType = "application/json";
+                        await context.Response.WriteAsync(jsonStatus);
+                    }
+                    catch (Exception exp)
+                    {
+                        _logger.LogError(exp, "OCPPMiddleware => Error: {0}", exp.Message);
+                        context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
+                    }
+                }
+                else if (cmd == "Reset")
+                {
+                    if (!string.IsNullOrEmpty(urlChargePointId))
+                    {
+                        try
+                        {
+                            ChargePointStatus status = null;
+                            if (_chargePointStatusDict.TryGetValue(urlChargePointId, out status))
+                            {
+                                // Send message to chargepoint
+                                if (status.Protocol == Protocol_OCPP20)
+                                {
+                                    // OCPP V2.0
+                                    await Reset20(status, context, dbContext);
+                                }
+                                else
+                                {
+                                    // OCPP V1.6
+                                    await Reset16(status, context, dbContext);
+                                }
+                            }
+                            else
+                            {
+                                // Chargepoint offline
+                                _logger.LogError("OCPPMiddleware SoftReset => Chargepoint offline: {0}", urlChargePointId);
+                                context.Response.StatusCode = (int)HttpStatusCode.NotFound;
+                            }
+                        }
+                        catch (Exception exp)
+                        {
+                            _logger.LogError(exp, "OCPPMiddleware SoftReset => Error: {0}", exp.Message);
+                            context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogError("OCPPMiddleware SoftReset => Missing chargepoint ID");
+                        context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+                    }
+                }
+                else if (cmd == "UnlockConnector")
+                {
+                    if (!string.IsNullOrEmpty(urlChargePointId))
+                    {
+                        try
+                        {
+                            ChargePointStatus status = null;
+                            if (_chargePointStatusDict.TryGetValue(urlChargePointId, out status))
+                            {
+                                // Send message to chargepoint
+                                if (status.Protocol == Protocol_OCPP20)
+                                {
+                                    // OCPP V2.0
+                                    await UnlockConnector20(status, context, dbContext);
+                                }
+                                else
+                                {
+                                    // OCPP V1.6
+                                    await UnlockConnector16(status, context, dbContext);
+                                }
+                            }
+                            else
+                            {
+                                // Chargepoint offline
+                                _logger.LogError("OCPPMiddleware UnlockConnector => Chargepoint offline: {0}", urlChargePointId);
+                                context.Response.StatusCode = (int)HttpStatusCode.NotFound;
+                            }
+                        }
+                        catch (Exception exp)
+                        {
+                            _logger.LogError(exp, "OCPPMiddleware UnlockConnector => Error: {0}", exp.Message);
+                            context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogError("OCPPMiddleware UnlockConnector => Missing chargepoint ID");
+                        context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+                    }
+                }
+                else
+                {
+                    // Unknown action/function
+                    _logger.LogWarning("OCPPMiddleware => action/function: {0}", cmd);
+                    context.Response.StatusCode = (int)HttpStatusCode.NotFound;
+                }
+            }
+        }
+
+        private static string GetChargePointIdentifierFromRequest(HttpContext context)
+        {
+            string chargepointIdentifier;
+            string[] parts = context.Request.Path.Value.Split('/');
+            if (string.IsNullOrWhiteSpace(parts[parts.Length - 1]))
+            {
+                // (Last part - 1) is chargepoint identifier
+                chargepointIdentifier = parts[parts.Length - 2];
+            }
+            else
+            {
+                // Last part is chargepoint identifier
+                chargepointIdentifier = parts[parts.Length - 1];
+            }
+
+            return chargepointIdentifier;
+        }
+
+        private bool IsClientCertAuthorized(HttpContext context, ChargePoint chargePoint)
+        {
+            // Chargepoint MUST send basic authentication header
+
+            bool certAuthSuccess = false;
+            X509Certificate2 clientCert = context.Connection.ClientCertificate;
+            if (clientCert != null)
+            {
+                if (clientCert.Thumbprint.Equals(chargePoint.ClientCertThumb, StringComparison.InvariantCultureIgnoreCase))
+                {
+                    // Authentication match => OK
+                    _logger.LogInformation("OCPPMiddleware => SUCCESS: Certificate authentication for chargepoint '{0}' match", chargePoint.ChargePointId);
+                    certAuthSuccess = true;
+                }
+                else
+                {
+                    // Authentication does NOT match => Failure
+                    _logger.LogWarning("OCPPMiddleware => FAILURE: Certificate authentication for chargepoint '{0}' does NOT match", chargePoint.ChargePointId);
+                }
+            }
+            if (certAuthSuccess == false)
+            {
+                context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+            }
+
+            return certAuthSuccess;
+        }
+
+        private bool IsUserAuthorized(HttpContext context, ChargePoint chargePoint)
+        {
+            // Chargepoint MUST send basic authentication header
+
+            bool basicAuthSuccess = false;
+
+            string authHeader = context.Request.Headers.Authorization;
+            if (!string.IsNullOrEmpty(authHeader))
+            {
+                string[] credentials = System.Text.Encoding.ASCII.GetString(Convert.FromBase64String(authHeader.Substring(6))).Split(':');
+                string username = credentials[0].Trim();
+                string password = credentials[1].Trim();
+
+                if (credentials.Length == 2 && chargePoint.ChargePointId == username && chargePoint.Password == password)
+                {
+                    // Authentication match => OK
+                    _logger.LogInformation("OCPPMiddleware => SUCCESS: Basic authentication for chargepoint '{0}' match", chargePoint.ChargePointId);
+                    basicAuthSuccess = true;
+                }
+                else
+                {
+                    // Authentication does NOT match => Failure
+                    _logger.LogWarning("OCPPMiddleware => FAILURE: Basic authentication for chargepoint '{0}' does NOT match", chargePoint.ChargePointId);
+                }
+            }
+            if (basicAuthSuccess == false)
+            {
+                context.Response.Headers.Append("WWW-Authenticate", "Basic realm=\"OCPP.Core\"");
+                context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+            }
+
+            return basicAuthSuccess;
         }
     }
 

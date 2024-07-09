@@ -2,17 +2,15 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
+using OCPP.Core.Database;
+using OCPP.Core.Server.Messages_OCPP20;
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using OCPP.Core.Server.Messages_OCPP20;
-using OCPP.Core.Database;
 
 namespace OCPP.Core.Server
 {
@@ -229,7 +227,6 @@ namespace OCPP.Core.Server
                 // invalid message
                 ocppTextMessage = string.Format("[{0},\"{1}\",\"{2}\",\"{3}\",{4}]", "4", string.Empty, Messages_OCPP20.ErrorCodes.ProtocolError, string.Empty, "{}");
             }
-
             string dumpDir = _configuration.GetValue<string>("MessageDumpDir");
             if (!string.IsNullOrWhiteSpace(dumpDir))
             {
