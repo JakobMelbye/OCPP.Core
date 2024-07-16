@@ -17,22 +17,22 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using OCPP.Core.Database;
+using System.Collections.Generic;
 
 namespace OCPP.Core.Server
 {
     public class Program
     {
+        // Dictionary with status objects for each charge point
+        public static Dictionary<string, ChargePointStatus> ChargePointStatusDict = new();
+
+        // Dictionary for processing asynchronous API calls
+        public static Dictionary<string, OCPPMessage> RequestQueue = new();
+
         public static void Main(string[] args)
         {
             IConfiguration config = new ConfigurationBuilder()

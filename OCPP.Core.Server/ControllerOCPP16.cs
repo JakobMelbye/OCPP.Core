@@ -17,19 +17,15 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-using System;
-using System.Collections.Generic;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Http;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using OCPP.Core.Database;
 using OCPP.Core.Server.Messages_OCPP16;
+using System;
 
 namespace OCPP.Core.Server
 {
-    public partial class ControllerOCPP16 : ControllerBase
+    public partial class ControllerOCPP16 : OcppControllerBase
     {
         /// <summary>
         /// Internal string for OCPP protocol version

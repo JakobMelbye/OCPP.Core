@@ -64,7 +64,7 @@ namespace OCPP.Core.Server
 
                             string ocppMessage = UTF8Encoding.UTF8.GetString(bMessage);
 
-                            Match match = Regex.Match(ocppMessage, MessageRegExp);
+                            Match match = Regex.Match(ocppMessage, MESSAGE_REG_EXP);
                             if (match != null && match.Groups != null && match.Groups.Count >= 3)
                             {
                                 string messageTypeId = match.Groups[1].Value;

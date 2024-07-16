@@ -17,10 +17,6 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-using System;
-using System.Net;
-using System.Net.Http;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
@@ -28,6 +24,10 @@ using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using OCPP.Core.Database;
+using System;
+using System.Net;
+using System.Net.Http;
+using System.Threading.Tasks;
 
 namespace OCPP.Core.Management.Controllers
 {
@@ -67,20 +67,20 @@ namespace OCPP.Core.Management.Controllers
                     ChargePoint chargePoint = DbContext.ChargePoints.Find(Id);
                     if (chargePoint != null)
                     {
-                        string serverApiUrl = base.Config.GetValue<string>("ServerApiUrl");
+                        string serverBaseUrl = base.Config.GetValue<string>("ServerBaseUrl");
                         string apiKeyConfig = base.Config.GetValue<string>("ApiKey");
-                        if (!string.IsNullOrEmpty(serverApiUrl))
+                        if (!string.IsNullOrEmpty(serverBaseUrl))
                         {
                             try
                             {
                                 using (var httpClient = new HttpClient())
                                 {
-                                    if (!serverApiUrl.EndsWith('/'))
+                                    if (!serverBaseUrl.EndsWith('/'))
                                     {
-                                        serverApiUrl += "/";
+                                        serverBaseUrl += "/";
                                     }
-                                    Uri uri = new Uri(serverApiUrl);
-                                    uri = new Uri(uri, $"Reset/{Uri.EscapeDataString(Id)}");
+                                    Uri uri = new Uri(serverBaseUrl);
+                                    uri = new Uri(uri, $"ocpp/operations/Reset/{Uri.EscapeDataString(Id)}");
                                     httpClient.Timeout = new TimeSpan(0, 0, 4); // use short timeout
 
                                     // API-Key authentication?
@@ -93,6 +93,7 @@ namespace OCPP.Core.Management.Controllers
                                         Logger.LogWarning("Reset: No API-Key configured!");
                                     }
 
+                                    httpClient.Timeout = new(0, 1, 0);
                                     HttpResponseMessage response = await httpClient.GetAsync(uri);
                                     if (response.StatusCode == HttpStatusCode.OK)
                                     {

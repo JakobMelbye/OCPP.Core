@@ -27,7 +27,7 @@ using OCPP.Core.Server.Messages_OCPP20;
 
 namespace OCPP.Core.Server
 {
-    public partial class ControllerOCPP20 : ControllerBase
+    public partial class ControllerOCPP20 : OcppControllerBase
     {
         public const string VendorId = "dallmann consulting GmbH";
 

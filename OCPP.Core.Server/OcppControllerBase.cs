@@ -17,28 +17,24 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Reflection;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Http;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Schema;
 using OCPP.Core.Database;
-using OCPP.Core.Server.Messages_OCPP16;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Reflection;
 
 namespace OCPP.Core.Server
 {
-    public partial class ControllerBase
+    public partial class OcppControllerBase
     {
         /// <summary>
         /// Internal string for OCPP protocol version
         /// </summary>
-        protected virtual string ProtocolVersion { get;  }
+        protected virtual string ProtocolVersion { get; }
 
         /// <summary>
         /// Configuration context for reading app settings
@@ -63,7 +59,7 @@ namespace OCPP.Core.Server
         /// <summary>
         /// Constructor
         /// </summary>
-        public ControllerBase(IConfiguration config, ILoggerFactory loggerFactory, ChargePointStatus chargePointStatus, OCPPCoreContext dbContext)
+        public OcppControllerBase(IConfiguration config, ILoggerFactory loggerFactory, ChargePointStatus chargePointStatus, OCPPCoreContext dbContext)
         {
             Configuration = config;
 
@@ -89,8 +85,8 @@ namespace OCPP.Core.Server
             bool validateMessages = Configuration.GetValue<bool>("ValidateMessages", false);
 
             string schemaJson = null;
-            if (validateMessages && 
-                !string.IsNullOrEmpty(codeBase) && 
+            if (validateMessages &&
+                !string.IsNullOrEmpty(codeBase) &&
                 Directory.Exists(codeBase))
             {
                 string msgTypeName = typeof(T).Name;

@@ -1,12 +1,4 @@
-﻿{
-  "iisSettings": {
-    "windowsAuthentication": false,
-    "anonymousAuthentication": true,
-    "iisExpress": {
-      "applicationUrl": "http://localhost:8082",
-      "sslPort": 0
-    }
-  },
+{
   "profiles": {
     "IIS Express": {
       "commandName": "IISExpress",
@@ -18,10 +10,18 @@
     "OCPP.Core.Management": {
       "commandName": "Project",
       "launchBrowser": true,
-      "applicationUrl": "http://localhost:8082",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development"
-      }
+      },
+      "applicationUrl": "http://localhost:8082"
+    }
+  },
+  "iisSettings": {
+    "windowsAuthentication": false,
+    "anonymousAuthentication": true,
+    "iisExpress": {
+      "applicationUrl": "http://localhost:63395/",
+      "sslPort": 44300
     }
   }
 }
